@@ -1,5 +1,6 @@
 // ground_segmentation_node.cpp
 #include <memory>
+#define DEG2RAD(x) ((x) * M_PI / 180.0)
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
@@ -52,8 +53,10 @@ private:
 
     seg.setOptimizeCoefficients(true);
     seg.setModelType(pcl::SACMODEL_PLANE);
+
     seg.setMethodType(pcl::SAC_RANSAC);
-    seg.setDistanceThreshold(0.1); // 距离阈值，可调节，单位米
+    seg.setDistanceThreshold(0.05); // 距离阈值，可调节，单位米地面拟合容差不超过 15cm
+    seg.setMaxIterations(2000);    // 尝试更多迭代次数
     seg.setInputCloud(cloud);
     seg.segment(*ground_inliers, *coefficients);
 
