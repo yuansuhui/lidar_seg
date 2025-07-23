@@ -4,16 +4,20 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
+#include <pcl/features/normal_3d.h>
+#include <pcl/common/angles.h>  // pcl::rad2deg
 
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/point_cloud.h>
 // 加载带颜色点类型
 #include <pcl/point_types.h>
 #include <nav_msgs/msg/odometry.hpp>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <pcl/common/transforms.h>
 
 #include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/filters/extract_indices.h>
-
 using PointInT = pcl::PointXYZI;    // 原始点云类型
 using PointRGBT = pcl::PointXYZRGB; // 带颜色点云类型
 
@@ -24,7 +28,7 @@ public:
   {
     // 订阅点云
     sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-      "/cloud_registered", 50,
+      "/rslidar_points", 50,
       std::bind(&GroundSegmentationNode::pointcloud_callback, this, std::placeholders::_1));
     // 订阅里程计话题
     odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
@@ -42,8 +46,10 @@ private:
   double odom_z;
   double odom_x;
   double odom_y;
+  
   geometry_msgs::msg::Point current_position_;
   geometry_msgs::msg::Quaternion current_orientation_;
+  Eigen::Matrix4f latest_odom_pose_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
       current_position_ = msg->pose.pose.position;
@@ -52,34 +58,47 @@ private:
       odom_x = current_position_.x;
       odom_y = current_position_.y;
 
-      // // 将四元数转换为欧拉角（roll, pitch, yaw）
-      // tf2::Quaternion q(
-      //     current_orientation_.x,
-      //     current_orientation_.y,
-      //     current_orientation_.z,
-      //     current_orientation_.w
-      // );
+    tf2::Quaternion q(
+        msg->pose.pose.orientation.x,
+        msg->pose.pose.orientation.y,
+        msg->pose.pose.orientation.z,
+        msg->pose.pose.orientation.w);
+    
+    tf2::Matrix3x3 R(q);
 
-      // tf2::Matrix3x3 m(q);
-      // double roll, pitch, yaw;
-      // m.getRPY(roll, pitch, yaw);
+    Eigen::Matrix4f odom_T_lidar = Eigen::Matrix4f::Identity();
+    odom_T_lidar.block<3,3>(0,0) << R[0][0], R[0][1], R[0][2],
+                                    R[1][0], R[1][1], R[1][2],
+                                    R[2][0], R[2][1], R[2][2];
 
-      // 可选打印
-      // RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Yaw angle (rad): %.3f", yaw);
+    odom_T_lidar(0,3) = msg->pose.pose.position.x;
+    odom_T_lidar(1,3) = msg->pose.pose.position.y;
+    odom_T_lidar(2,3) = msg->pose.pose.position.z;
+
+    // 存储到成员变量中，供点云回调时使用
+    latest_odom_pose_ = odom_T_lidar;
   }
+
 void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg)
 {
-  pcl::PointCloud<PointInT>::Ptr cloud(new pcl::PointCloud<PointInT>);
+  pcl::PointCloud<pcl::PointXYZI>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZI>);
   pcl::fromROSMsg(*cloud_msg, *cloud);
 
-  if (cloud->empty()) {
+  pcl::PointCloud<pcl::PointXYZI>::Ptr transformed_cloud(new pcl::PointCloud<pcl::PointXYZI>());
+
+  // 将 latest_odom_pose_ 从 double 类型转换为 float 类型
+  Eigen::Matrix4f transform = latest_odom_pose_.cast<float>();
+
+  pcl::transformPointCloud(*cloud, *transformed_cloud, transform);
+
+  if (transformed_cloud->empty()) {
     RCLCPP_WARN(this->get_logger(), "Received empty point cloud");
     return;
   }
 
   pcl::PointCloud<PointInT>::Ptr cloud_filtered_z(new pcl::PointCloud<PointInT>);
-  for (const auto& pt : cloud->points) {
-    if (pt.z - odom_z > -1.5 && pt.z - odom_z < -0.1) {
+  for (const auto& pt : transformed_cloud->points) {
+    if (pt.z - odom_z > -1.5 && pt.z - odom_z < 0.2) {
       cloud_filtered_z->points.push_back(pt);
     }
   }
@@ -103,7 +122,7 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
   seg.setOptimizeCoefficients(true);
   seg.setModelType(pcl::SACMODEL_PLANE);
   seg.setMethodType(pcl::SAC_LMEDS); // 
-  seg.setDistanceThreshold(0.1);
+  seg.setDistanceThreshold(0.07);
   seg.setMaxIterations(500);
   seg.setInputCloud(cloud_filtered_z);
   seg.segment(*ground_inliers, *coefficients);
@@ -145,7 +164,7 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
   pcl::PointCloud<PointInT>::Ptr cloud_refined_ground(new pcl::PointCloud<PointInT>);
   pcl::PointCloud<PointInT>::Ptr cloud_refined_non_ground(new pcl::PointCloud<PointInT>);
 
-  for (const auto& pt : cloud->points) {
+  for (const auto& pt : transformed_cloud->points) {
     float dist = std::fabs(a * pt.x + b_ * pt.y + pt.z + d) / std::sqrt(a * a + b_ * b_ + c * c);
     if (dist < 0.1f) { // 精修平面距离阈值
       cloud_refined_ground->points.push_back(pt);
@@ -153,7 +172,6 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
       cloud_refined_non_ground->points.push_back(pt);
     }
   }
-
   auto cloud_ground_rgb = convertToColoredCloud(cloud_refined_ground, 0, 255, 0);
   auto cloud_non_ground_rgb = convertToColoredCloud(cloud_refined_non_ground, 255, 0, 0);
 
@@ -196,6 +214,7 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
     sensor_msgs::msg::PointCloud2 output;
     pcl::toROSMsg(*cloud, output);
     output.header = header;
+    output.header.frame_id = "camera_init";
     pub->publish(output);
   }
 
