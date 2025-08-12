@@ -242,9 +242,16 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
       cloud_refined_non_ground->points.push_back(pt);
     }
   }
+  for(const auto& pt : cloud_refined_non_ground->points){
+    if(pt.x-odom_x>-1.2&&pt.x-odom_x<1.2){
+      continue;
+    }else{
+      cloud_refined_non_ground2->points.push_back(pt);
+    }
+  }
 
   auto cloud_ground_rgb = convertToColoredCloud(cloud_refined_ground, 0, 255, 0);
-  auto cloud_non_ground_rgb = convertToColoredCloud(cloud_refined_non_ground, 255, 0, 0);
+  auto cloud_non_ground_rgb = convertToColoredCloud(cloud_refined_non_ground2, 255, 0, 0);
 
   publishCloud(cloud_ground_rgb, cloud_msg->header, pub_ground_);
   publishCloud(cloud_non_ground_rgb, cloud_msg->header, pub_non_ground_);
