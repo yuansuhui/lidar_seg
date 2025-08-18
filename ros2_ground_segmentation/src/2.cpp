@@ -16,7 +16,8 @@
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <pcl/common/transforms.h>
 #include <cmath>
-
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/filters/passthrough.h>       // PassThrough 滤波器
 #include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/filters/extract_indices.h>
 using PointInT = pcl::PointXYZI;    // 原始点云类型
@@ -39,10 +40,6 @@ public:
     pub_ground_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("ground_points_colored", 10);
     // 发布带颜色非地面点云
     pub_non_ground_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("non_ground_points_colored", 10);
-    // timer_ = this->create_wall_timer(
-    //   std::chrono::milliseconds(500),  // 每 0.5 秒检查一次
-    //   std::bind(&GroundSegmentationNode::timer_callback, this));
-    //     RCLCPP_INFO(this->get_logger(), "Ground Segmentation Node started.");
   }
 
 private:
@@ -57,31 +54,6 @@ private:
   Eigen::Matrix4f latest_odom_pose_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
 
-  // void timer_callback()
-  // {
-  //   auto now = this->get_clock()->now();
-  //   double elapsed = (now - last_data_time_).seconds();
-
-  //   if (elapsed > 5.0 && !map_cleared_) {
-  //     RCLCPP_WARN(this->get_logger(), "No pointcloud received in 5s, clearing clouds.");
-
-  //     // cloud_refined_ground->clear();
-  //     // cloud_refined_non_ground->clear();
-
-  //     // 发布空点云
-  //     auto empty_cloud = pcl::PointCloud<pcl::PointXYZRGB>::Ptr(new pcl::PointCloud<pcl::PointXYZRGB>);
-  //     std_msgs::msg::Header header;
-  //     header.stamp = this->now();
-  //     header.frame_id = "camera_init"; 
-  //     // auto header = header;
-      
-
-  //     publishCloud(empty_cloud, header, pub_ground_);
-  //     publishCloud(empty_cloud, header, pub_non_ground_);
-
-  //     map_cleared_ = true;
-  //   }
-  // }
 
   void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
   //   if (!msg ) {
@@ -113,66 +85,49 @@ private:
 
     // 存储到成员变量中，供点云回调时使用
     latest_odom_pose_ = odom_T_lidar;
+    RCLCPP_INFO(this->get_logger(), "Odom time: %d.%09u",
+              msg->header.stamp.sec,
+              msg->header.stamp.nanosec);
   }
 
 void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg)
 {
+  RCLCPP_INFO(this->get_logger(), "point time: %d.%09u",
+            cloud_msg->header.stamp.sec,
+            cloud_msg->header.stamp.nanosec);
+
   bool map_cleared_ = false;
 
   pcl::PointCloud<pcl::PointXYZI>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZI>);
   pcl::fromROSMsg(*cloud_msg, *cloud);
-  pcl::PointCloud<pcl::PointXYZI>::Ptr transformed_cloud2(new pcl::PointCloud<pcl::PointXYZI>());
-  for (const auto& pt2 : cloud->points) {
-  if (!std::isfinite(pt2.x) || !std::isfinite(pt2.y) || !std::isfinite(pt2.z)) continue;
-  //   // 移除距离小于 0.8 的点
-    if (((pt2.x ) <1.2 && (pt2.x ) > -1.2)) continue;
-
-    transformed_cloud2->points.push_back(pt2);
+  std::cout << "cloud num: " << cloud->points.size() << std::endl;
+  pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_copy(new pcl::PointCloud<pcl::PointXYZI>());
+  for (const auto& pt : cloud->points) {
+    if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z)) continue;
+    if (pt.z  > -2 && pt.z < -0.1 && pt.x<10 && pt.x>-10 && pt.y<10 && pt.y>-10) {
+      cloud_copy->points.push_back(pt);
+    }
   } 
-  transformed_cloud2->width = transformed_cloud2->points.size();
-  transformed_cloud2->height = 1;
-  transformed_cloud2->is_dense = true;
-
+  cloud_copy->width = cloud_copy->points.size();
+  cloud_copy->height = 1;
+  cloud_copy->is_dense = true;
   pcl::PointCloud<pcl::PointXYZI>::Ptr transformed_cloud(new pcl::PointCloud<pcl::PointXYZI>());
 
   // 将 latest_odom_pose_ 从 double 类型转换为 float 类型
   Eigen::Matrix4f transform = latest_odom_pose_.cast<float>();
 
   // 变换点云
-  pcl::transformPointCloud(*transformed_cloud2, *transformed_cloud, transform);
- // 将 msg 转换为 PCL 点云
-
-  // 创建一个新的点云，用于保存筛选后的点
-  pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_filtered(new pcl::PointCloud<pcl::PointXYZI>());
-  for (const auto& pt : transformed_cloud->points) {
-    if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z)) continue;
-    cloud_filtered->points.push_back(pt);
-  } 
-
-  if (cloud_filtered->empty()) {
-    RCLCPP_WARN(this->get_logger(), "Received empty point cloud");
-    return;
-  }
-
-  pcl::PointCloud<PointInT>::Ptr cloud_filtered_z(new pcl::PointCloud<PointInT>);
-  for (const auto& pt : cloud_filtered->points) {
-    if (pt.z - odom_z > -2 && pt.z - odom_z < -0.1) {
-      cloud_filtered_z->points.push_back(pt);
-    }
-  }
-  // RCLCPP_INFO(this->get_logger(), "处理完成 %zu 个点", cloud_filtered_z->points.size());
-  if (cloud_filtered_z->empty()) {
-    // RCLCPP_WARN(this->get_logger(), "Filtered point cloud has no points in Z range");
-    return;
-  }
-
-  cloud_filtered_z->width = cloud_filtered_z->points.size();
-  cloud_filtered_z->height = 1;
-  cloud_filtered_z->is_dense = true;
-
+  pcl::transformPointCloud(*cloud_copy, *transformed_cloud, transform);
+  auto start = std::chrono::high_resolution_clock::now();  // 开始时间
+  std::cout << "cloud_copy num: " << cloud_copy->points.size() << std::endl;
   // ------------------------------
   // Step 1: LMedS 拟合平面初步提取地面 inliers
   // ------------------------------
+  pcl::PassThrough<PointInT> pass;
+  pass.setInputCloud(transformed_cloud);
+  pass.setFilterFieldName("z");
+  pass.setFilterLimits(odom_z-2.0, odom_z); // 只保留 -2m 到 0m 的点
+  pass.filter(*transformed_cloud);
   pcl::SACSegmentation<PointInT> seg;
   pcl::PointIndices::Ptr ground_inliers(new pcl::PointIndices);
   pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
@@ -180,9 +135,9 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
   seg.setOptimizeCoefficients(true);
   seg.setModelType(pcl::SACMODEL_PLANE);
   seg.setMethodType(pcl::SAC_LMEDS); // 
-  seg.setDistanceThreshold(0.07);
+  seg.setDistanceThreshold(0.1);
   seg.setMaxIterations(500);
-  seg.setInputCloud(cloud_filtered_z);
+  seg.setInputCloud(transformed_cloud);
   seg.segment(*ground_inliers, *coefficients);
 
   if (ground_inliers->indices.empty()) {
@@ -191,11 +146,16 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
     publishCloud(cloud_non_ground_rgb, cloud_msg->header, pub_non_ground_);
     return;
   }
+  auto end = std::chrono::high_resolution_clock::now();    // 结束时间
 
+  // 计算耗时（毫秒）
+  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+  std::cout << "seg time: " << duration.count() << " ms" << std::endl;
 
   pcl::PointCloud<PointInT>::Ptr cloud_ground(new pcl::PointCloud<PointInT>);
   pcl::ExtractIndices<PointInT> extract;
-  extract.setInputCloud(cloud_filtered_z);
+  extract.setInputCloud(transformed_cloud);
+
   extract.setIndices(ground_inliers);
   extract.setNegative(false);
   extract.filter(*cloud_ground);
@@ -209,11 +169,23 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
     b(i) = -cloud_ground->points[i].z;
   }
 
-  Eigen::Vector3f x = A.colPivHouseholderQr().solve(b); // 解线性最小二乘问题
+  Eigen::Vector3f x = A.householderQr().solve(b); // 解线性最小二乘问题
 
   float a = x(0), b_ = x(1), d = x(2);
   float c = 1.0f; // z 系数设为 1，得到 plane: ax + by + z + d = 0
+  Eigen::Vector3f normal(a, b_, 1.0f);
+  normal.normalize();
+  Eigen::Vector3f odo_z(0.0, 0.0, odom_z);
 
+  float dot = normal.dot(odo_z);  // 点积
+  float cos_theta = dot / (normal.norm() * odo_z.norm());
+  
+  // 防止数值误差导致 cos_theta 超过 [-1,1]
+  cos_theta = std::max(-1.0f, std::min(1.0f, cos_theta));
+
+  float angle = std::acos(cos_theta);  // 弧度
+  float angle_deg = angle * 180.0f / M_PI; // 转换为角度
+  std::cout << "夹角（角度）: " << angle_deg << std::endl;
   // RCLCPP_INFO(this->get_logger(), "Refined Plane: a=%.3f, b=%.3f, c=%.3f, d=%.3f", a, b_, c, d);
 
   // ------------------------------
@@ -221,22 +193,12 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
   // ------------------------------
   pcl::PointCloud<PointInT>::Ptr cloud_refined_ground(new pcl::PointCloud<PointInT>);
   pcl::PointCloud<PointInT>::Ptr cloud_refined_non_ground(new pcl::PointCloud<PointInT>);
+  pcl::PointCloud<PointInT>::Ptr cloud_refined_non_ground2(new pcl::PointCloud<PointInT>);
 
   for (const auto& pt : transformed_cloud->points) {
     float dist = std::fabs(a * pt.x + b_ * pt.y + pt.z + d) / std::sqrt(a * a + b_ * b_ + c * c);
-    // float r = 0.0;
-    // if(pt.y-odom_y>-2&&pt.y-odom_y<2&&pt.x-odom_x>9){
-    //   r = std::sqrt(pt.x * pt.x + pt.y * pt.y);
-    // }
     
-    // float adaptive_thresh;
-    // if(r>10){
-    //   adaptive_thresh = 0.1 + 0.03 * r;
-    // }else{
-    //   adaptive_thresh = 0.1 ;
-    // }
-    
-    if (dist < 0.1f) { // 精修平面距离阈值
+    if (dist < 0.1f ) { // 精修平面距离阈值
       cloud_refined_ground->points.push_back(pt);
     } else {
       cloud_refined_non_ground->points.push_back(pt);
@@ -255,6 +217,12 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
 
   publishCloud(cloud_ground_rgb, cloud_msg->header, pub_ground_);
   publishCloud(cloud_non_ground_rgb, cloud_msg->header, pub_non_ground_);
+  // auto end = std::chrono::high_resolution_clock::now();    // 结束时间
+
+  // // 计算耗时（毫秒）
+  // auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+  // std::cout << "seg time: " << duration.count() << " ms" << std::endl;
+
 }
 
 
@@ -293,7 +261,7 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
     pcl::toROSMsg(*cloud, output);
     output.header = header;
     output.header.frame_id = "camera_init";
-    pub->publish(output);
+    pub->publish(output); 
     // RCLCPP_INFO(this->get_logger(), "Published point cloud with %lu points.", cloud->points.size());
   }
 
@@ -306,7 +274,16 @@ int main(int argc, char** argv)
 {
   rclcpp::init(argc, argv);
   auto node = std::make_shared<GroundSegmentationNode>();
-  rclcpp::spin(node);
-  rclcpp::shutdown();
-  return 0;
+    rclcpp::executors::MultiThreadedExecutor executor(
+        rclcpp::ExecutorOptions(), 
+        std::thread::hardware_concurrency()
+    );
+
+    executor.add_node(node);
+    executor.spin();
+    rclcpp::shutdown();
+    return 0;
+  // rclcpp::spin(node);
+  // rclcpp::shutdown();
+  // return 0;
 }
