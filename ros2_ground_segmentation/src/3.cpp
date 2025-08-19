@@ -97,22 +97,23 @@ private:
     // 存储到成员变量中，供点云回调时使用
     std::lock_guard<std::mutex> lock(odom_mutex_);
     latest_odom_pose_ = odom_T_lidar;
-    RCLCPP_INFO(this->get_logger(), "Odom time: %d.%09u",
-              msg->header.stamp.sec,
-              msg->header.stamp.nanosec);
+    // RCLCPP_INFO(this->get_logger(), "Odom time: %d.%09u",
+    //           msg->header.stamp.sec,
+    //           msg->header.stamp.nanosec);
   }
 
 void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg)
 {
-  RCLCPP_INFO(this->get_logger(), "point time: %d.%09u",
-            cloud_msg->header.stamp.sec,
-            cloud_msg->header.stamp.nanosec);
+  if (!latest_odom_pose_.isZero(1e-6)) {
+  // RCLCPP_INFO(this->get_logger(), "point time: %d.%09u",
+  //           cloud_msg->header.stamp.sec,
+  //           cloud_msg->header.stamp.nanosec);
 
   bool map_cleared_ = false;
 
   pcl::PointCloud<pcl::PointXYZI>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZI>);
   pcl::fromROSMsg(*cloud_msg, *cloud);
-  std::cout << "cloud num: " << cloud->points.size() << std::endl;
+  // std::cout << "cloud num: " << cloud->points.size() << std::endl;
   pcl::VoxelGrid<pcl::PointXYZI> voxel_filter;
   voxel_filter.setInputCloud(cloud);
   voxel_filter.setLeafSize(0.2f, 0.2f, 0.2f);  // 体素大小 (m)，根据需要调整
@@ -137,12 +138,13 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
   {
       std::lock_guard<std::mutex> lock(odom_mutex_);
       transform = latest_odom_pose_.cast<float>();
+
   }
 
   // 变换点云
   pcl::transformPointCloud(*cloud_copy, *transformed_cloud, transform);
   auto start = std::chrono::high_resolution_clock::now();  // 开始时间
-  std::cout << "cloud_copy num: " << cloud_copy->points.size() << std::endl;
+  // std::cout << "cloud_copy num: " << cloud_copy->points.size() << std::endl;
   // ------------------------------
   // Step 1: LMedS 拟合平面初步提取地面 inliers
   // ------------------------------
@@ -166,6 +168,9 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
   seg.segment(*ground_inliers, *coefficients);
 
   if (ground_inliers->indices.empty()) {
+      std::cout << "latest_odom_pose_:\n" 
+                << latest_odom_pose_.format(Eigen::IOFormat(Eigen::FullPrecision, 0, ", ", "\n", "[", "]"))
+                << std::endl;
     RCLCPP_WARN(this->get_logger(), "No ground plane found by LMedS.");
     auto cloud_non_ground_rgb = convertToColoredCloud(cloud, 255, 0, 0);
     publishCloud(cloud_non_ground_rgb, cloud_msg->header, pub_non_ground_);
@@ -175,7 +180,7 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
 
   // 计算耗时（毫秒）
   auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-  std::cout << "seg time: " << duration.count() << " ms" << std::endl;
+  // std::cout << "seg time: " << duration.count() << " ms" << std::endl;
 
   pcl::PointCloud<PointInT>::Ptr cloud_ground(new pcl::PointCloud<PointInT>);
   pcl::ExtractIndices<PointInT> extract;
@@ -210,7 +215,11 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
 
   float angle = std::acos(cos_theta);  // 弧度
   float angle_deg = angle * 180.0f / M_PI; // 转换为角度
-  std::cout << "夹角（角度）: " << angle_deg << std::endl;
+  if(angle_deg>165&&angle_deg<180){
+    angle_deg = 180-angle_deg;
+  }
+  // std::cout << "夹角（角度）: " << odom_z << std::endl;
+  std::cout << "2: " << abs(180-angle_deg) << std::endl;
   // RCLCPP_INFO(this->get_logger(), "Refined Plane: a=%.3f, b=%.3f, c=%.3f, d=%.3f", a, b_, c, d);
 
   // ------------------------------
@@ -225,7 +234,7 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
   for (const auto& pt : transformed_cloud->points) {
     float dist = std::fabs(a * pt.x + b_ * pt.y + pt.z + d) / std::sqrt(a * a + b_ * b_ + c * c);
     
-    if (dist < 0.1f && angle_deg <10) { // 精修平面距离阈值
+    if (dist < 0.1f && angle_deg<30) { // 精修平面距离阈值
       cloud_refined_ground->points.push_back(pt);
     } else {
       cloud_refined_non_ground->points.push_back(pt);
@@ -251,7 +260,9 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
   // // 计算耗时（毫秒）
   // auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
   // std::cout << "seg time: " << duration.count() << " ms" << std::endl;
-
+  }else{
+    return;
+  }
 }
 
 
