@@ -1,7 +1,8 @@
 // ground_segmentation_node.cpp
 #include <memory>
 #define DEG2RAD(x) ((x) * M_PI / 180.0)
-
+#include <deque>
+#include <pcl/common/io.h> 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include <pcl/features/normal_3d.h>
@@ -129,7 +130,7 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
   pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_copy(new pcl::PointCloud<pcl::PointXYZI>());
   for (const auto& pt : cloud_filtered->points) {
     if (!std::isfinite(pt.x) ||!std::isfinite(pt.y) ||!std::isfinite(pt.z)) continue;
-    if (pt.z  > -2.0 && pt.z < 0.2 && pt.x<10 && pt.x>-10 && pt.y<10 && pt.y>-10) {
+    if (pt.z  > -5.0 && pt.z < 0.2 && pt.x<10 && pt.x>-10 && pt.y<10 && pt.y>-10) {
       cloud_copy->points.push_back(pt);
     }
   } 
@@ -162,7 +163,7 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
   seg.setOptimizeCoefficients(true);
   seg.setModelType(pcl::SACMODEL_PLANE);
   seg.setMethodType(pcl::SAC_LMEDS); 
-  seg.setDistanceThreshold(0.2);
+  seg.setDistanceThreshold(0.07);
   seg.setMaxIterations(20);
   seg.setInputCloud(transformed_cloud);
   seg.segment(*ground_inliers, *coefficients);
@@ -176,10 +177,7 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
     publishCloud(cloud_non_ground_rgb, cloud_msg->header, pub_non_ground_);
     return;
   }
-  auto end = std::chrono::high_resolution_clock::now();  
 
-  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-  // std::cout << "seg time: " << duration.count() << " ms" << std::endl;
 
   pcl::PointCloud<PointInT>::Ptr cloud_ground(new pcl::PointCloud<PointInT>);
   pcl::PointCloud<PointInT>::Ptr non_cloud_ground(new pcl::PointCloud<PointInT>);
@@ -213,7 +211,8 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
 
   float angle = std::acos(cos_theta);  
   float angle_deg = angle * 180.0f / M_PI; 
-  if(angle_deg>165&&angle_deg<180){
+  if(angle_deg>135&&angle_deg<180){
+    // RCLCPP_INFO(this->get_logger(), "Refined Plane:");
     angle_deg = 180-angle_deg;
   }
   
@@ -231,7 +230,7 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
     float dist = std::fabs(a * pt.x + b_ * pt.y + pt.z + d) / std::sqrt(a * a + b_ * b_ + c * c);
     // std::cout << "abs(180-angle_deg): " << abs(180-angle_deg) << std::endl;
     // std::cout << "dist: " << dist<< std::endl;
-    if (dist < 0.1f && angle_deg<30) { 
+    if (dist < 0.09f && angle_deg<45) { 
       cloud_refined_ground->points.push_back(pt);
     } else {
       cloud_refined_non_ground->points.push_back(pt);
@@ -260,7 +259,7 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
           }
 
           float dz = z_max - z_min;
-          if (dz < 0.06f) {
+          if (dz < 0.1f) {
               cloud_refined_ground->points.push_back(pt);
           } else {
               cloud_refined_non_ground2_new->points.push_back(pt);
@@ -284,6 +283,10 @@ void pointcloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_ms
   publishCloud(cloud_ground_rgb, cloud_msg->header, pub_ground_);
   publishCloud(cloud_non_ground_rgb, cloud_msg->header, pub_non_ground_);
   publishCloud(cloud_non_ground_rgb2, cloud_msg->header, pub_non_ground2_);
+  auto end = std::chrono::high_resolution_clock::now();  
+
+  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+  // std::cout << "seg time: " << duration.count() << " ms" << std::endl;
   cloud_refined_non_ground2->points.clear();
   cloud_refined_non_ground->points.clear();
   cloud_refined_ground->points.clear();
